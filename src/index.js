@@ -256,6 +256,10 @@ export default (function create(/** @type {Options} */ defaults) {
 				return response;
 			}
 
+			response.request = {
+				responseURL: url
+			}
+
 			return res[options.responseType || 'text']()
 				.then((data) => {
 					response.data = data;
