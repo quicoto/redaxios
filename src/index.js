@@ -16,7 +16,7 @@
  * @typedef Options
  * @property {string} [url] the URL to request
  * @property {'get'|'post'|'put'|'patch'|'delete'|'options'|'head'|'GET'|'POST'|'PUT'|'PATCH'|'DELETE'|'OPTIONS'|'HEAD'} [method="get"] HTTP method, case-insensitive
- * @property {RequestHeaders} [headers] Request headers
+ * @property {Headers} [headers] Request headers
  * @property {FormData|string|object} [body] a body, optionally encoded, to send
  * @property {'text'|'json'|'stream'|'blob'|'arrayBuffer'|'formData'|'stream'} [responseType="json"] An encoding to use for the response
  * @property {Record<string,any>|URLSearchParams} [params] querystring parameters
@@ -26,16 +26,17 @@
  * @property {string} [xsrfCookieName] Pass an Cross-site Request Forgery prevention cookie value as a header defined by `xsrfHeaderName`
  * @property {string} [xsrfHeaderName] The name of a header to use for passing XSRF cookies
  * @property {(status: number) => boolean} [validateStatus] Override status code handling (default: 200-399 is a success)
- * @property {Array<(body: any, headers?: RequestHeaders) => any?>} [transformRequest] An array of transformations to apply to the outgoing request
+ * @property {Array<(body: any, headers: Headers) => any?>} [transformRequest] An array of transformations to apply to the outgoing request
  * @property {string} [baseURL] a base URL from which to resolve all URLs
  * @property {typeof window.fetch} [fetch] Custom window.fetch implementation
+ * @property {AbortSignal} [cancelToken] signal returned by AbortController
  * @property {any} [data]
  */
 
 /**
  * @public
- * @typedef RequestHeaders
- * @type {{[name: string]: string} | Headers}
+ * @typedef Headers
+ * @type {{[name: string]: string}}
  */
 
 /**
@@ -65,11 +66,17 @@
  */
 
 /**
- * @public
- * @param {Options} [defaults = {}]
- * @returns {redaxios}
+ * @typedef CancelToken
+ * @type {{ (executor: Function): AbortSignal; source(): { token: AbortSignal; cancel: () => void; }; }}
  */
-function create(defaults) {
+
+/**
+ * @typedef CancelTokenSourceMethod
+ * @type {() => { token: AbortSignal, cancel: () => void }}
+ */
+
+/** */
+export default (function create(/** @type {Options} */ defaults) {
 	defaults = defaults || {};
 
 	/**
@@ -109,21 +116,25 @@ function create(defaults) {
 	 * @param {(...args: Args[]) => R} fn
 	 * @returns {(array: Args[]) => R}
 	 */
-	redaxios.spread = (fn) => /** @type {any} */ (fn.apply.bind(fn, fn));
+	redaxios.spread = function (fn) {
+		return function (results) {
+			return fn.apply(this, results);
+		};
+	};
+	// 3b smaller:
+	// redaxios.spread = (fn) => /** @type {any} */ (fn.apply.bind(fn, fn));
 
 	/**
 	 * @private
-	 * @template T, U
-	 * @param {T} opts
-	 * @param {U} [overrides]
+	 * @param {Record<string,any>} opts
+	 * @param {Record<string,any>} [overrides]
 	 * @param {boolean} [lowerCase]
-	 * @returns {{} & (T | U)}
+	 * @returns {Partial<opts>}
 	 */
 	function deepMerge(opts, overrides, lowerCase) {
-		let out = /** @type {any} */ ({}),
+		let out = {},
 			i;
 		if (Array.isArray(opts)) {
-			// @ts-ignore
 			return opts.concat(overrides);
 		}
 		for (i in opts) {
@@ -133,77 +144,112 @@ function create(defaults) {
 		for (i in overrides) {
 			const key = lowerCase ? i.toLowerCase() : i;
 			const value = /** @type {any} */ (overrides)[i];
-			out[key] = key in out && typeof value == 'object' ? deepMerge(out[key], value, key == 'headers') : value;
+			out[key] = key in out && typeof value == 'object' ? deepMerge(out[key], value, key === 'headers') : value;
 		}
 		return out;
 	}
 
 	/**
+	 * CancelToken
+	 * @private
+	 * @param {Function} executor
+	 * @returns {AbortSignal}
+	 */
+	function CancelToken(executor) {
+		if (typeof executor !== 'function') {
+			throw new TypeError('executor must be a function.');
+		}
+
+		const ac = new AbortController();
+
+		executor(ac.abort.bind(ac));
+
+		return ac.signal;
+	}
+
+	/**
+	 * @private
+	 * @type {CancelTokenSourceMethod}
+	 * @returns
+	 */
+	CancelToken.source = () => {
+		const ac = new AbortController();
+
+		return {
+			token: ac.signal,
+			cancel: ac.abort.bind(ac)
+		};
+	};
+
+	/**
 	 * Issues a request.
 	 * @public
 	 * @template T
-	 * @param {string | Options} urlOrConfig
-	 * @param {Options} [config = {}]
-	 * @param {any} [_method] (internal)
-	 * @param {any} [data] (internal)
-	 * @param {never} [_undefined] (internal)
+	 * @param {string | Options} url
+	 * @param {Options} [config]
+	 * @param {any} [_method]
+	 * @param {any} [_data]
 	 * @returns {Promise<Response<T>>}
 	 */
-	function redaxios(urlOrConfig, config, _method, data, _undefined) {
-		let url = /** @type {string} */ (typeof urlOrConfig != 'string' ? (config = urlOrConfig).url : urlOrConfig);
+	function redaxios(url, config, _method, _data) {
+		if (typeof url !== 'string') {
+			config = url;
+			url = config.url;
+		}
 
 		const response = /** @type {Response<any>} */ ({ config });
 
 		/** @type {Options} */
 		const options = deepMerge(defaults, config);
 
-		/** @type {RequestHeaders} */
+		/** @type {Headers} */
 		const customHeaders = {};
 
-		data = data || options.data;
+		let data = _data || options.data;
 
 		(options.transformRequest || []).map((f) => {
 			data = f(data, options.headers) || data;
 		});
 
-		if (options.auth) {
-			customHeaders.authorization = options.auth;
-		}
-
-		if (data && typeof data === 'object' && typeof data.append !== 'function' && typeof data.text !== 'function') {
+		if (data && typeof data === 'object' && typeof data.append !== 'function') {
 			data = JSON.stringify(data);
 			customHeaders['content-type'] = 'application/json';
 		}
 
-		try {
-			// @ts-ignore providing the cookie name without header name is nonsensical anyway
-			customHeaders[options.xsrfHeaderName] = decodeURIComponent(
-				// @ts-ignore accessing match()[2] throws for no match, which is intentional
-				document.cookie.match(RegExp('(^|; )' + options.xsrfCookieName + '=([^;]*)'))[2]
-			);
-		} catch (e) {}
+		const m =
+			typeof document !== 'undefined' && document.cookie.match(RegExp('(^|; )' + options.xsrfCookieName + '=([^;]*)'));
+		if (m) customHeaders[options.xsrfHeaderName] = m[2];
+
+		if (options.auth) {
+			customHeaders.authorization = options.auth;
+		}
 
 		if (options.baseURL) {
-			url = url.replace(/^(?!.*\/\/)\/?/, options.baseURL + '/');
+			url = url.replace(/^(?!.*\/\/)\/?(.*)$/, options.baseURL + '/$1');
 		}
 
 		if (options.params) {
-			url +=
-				(~url.indexOf('?') ? '&' : '?') +
-				(options.paramsSerializer ? options.paramsSerializer(options.params) : new URLSearchParams(options.params));
+			const divider = ~url.indexOf('?') ? '&' : '?';
+			const query = options.paramsSerializer
+				? options.paramsSerializer(options.params)
+				: new URLSearchParams(options.params);
+			url += divider + query;
 		}
 
 		const fetchFunc = options.fetch || fetch;
 
 		return fetchFunc(url, {
-			method: (_method || options.method || 'get').toUpperCase(),
+			method: _method || options.method,
 			body: data,
 			headers: deepMerge(options.headers, customHeaders, true),
-			credentials: options.withCredentials ? 'include' : _undefined
+			credentials: options.withCredentials ? 'include' : 'same-origin',
+			signal: options.cancelToken
 		}).then((res) => {
 			for (const i in res) {
 				if (typeof res[i] != 'function') response[i] = res[i];
 			}
+
+			const ok = options.validateStatus ? options.validateStatus(res.status) : res.ok;
 
 			if (options.responseType == 'stream') {
 				response.data = res.body;
@@ -217,18 +263,22 @@ function create(defaults) {
 					response.data = JSON.parse(data);
 				})
 				.catch(Object)
-				.then(() => {
-					const ok = options.validateStatus ? options.validateStatus(res.status) : res.ok;
-					return ok ? response : Promise.reject(response);
-				});
+				.then(() => (ok ? response : Promise.reject(response)));
 		});
 	}
 
 	/**
 	 * @public
-	 * @type {AbortController}
+	 * @type {CancelToken}
 	 */
-	redaxios.CancelToken = /** @type {any} */ (typeof AbortController == 'function' ? AbortController : Object);
+	redaxios.CancelToken = CancelToken;
+
+	/**
+	 * @public
+	 * @param {DOMError} e
+	 * @returns {boolean}
+	 */
+	redaxios.isCancel = (e) => e.name === 'AbortError';
 
 	/**
 	 * @public
@@ -242,6 +292,4 @@ function create(defaults) {
 	redaxios.create = create;
 
 	return redaxios;
-}
-
-export default create();
+})();
