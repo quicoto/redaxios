@@ -231,7 +231,7 @@ export default (function create(/** @type {Options} */ defaults) {
 		const fetchFunc = options.fetch || fetch;
 
 		return fetchFunc(url, {
-			method: _method || options.method,
+			method: (_method || options.method).toUpperCase(),
 			body: data,
 			headers: deepMerge(options.headers, customHeaders, true),
 			credentials: options.withCredentials ? 'include' : 'same-origin',
