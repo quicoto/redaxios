@@ -263,8 +263,10 @@ export default (function create(/** @type {Options} */ defaults) {
 			return res[options.responseType || 'text']()
 				.then((data) => {
 					response.data = data;
-					if (typeof data === 'object' && data !== null) return;
-					response.data = JSON.parse(data);
+					// its okay if this fails: response.data will be the unparsed value:
+					try {
+					  response.data = JSON.parse(data);
+					} catch (e) {}
 				})
 				.then(() => (ok ? response : Promise.reject(response)));
 		});
