@@ -228,12 +228,20 @@ export default (function create(/** @type {Options} */ defaults) {
 			url += divider + query;
 		}
 
+		const mergedHeaders = deepMerge(options.headers, customHeaders, true)
 		const fetchFunc = options.fetch || fetch;
+
+		// Headers set with value 'remove_header' will be removed
+		Object.keys(mergedHeaders).forEach(header => {
+			if (mergedHeaders[header] === 'remove_header') {
+				delete mergedHeaders[header]
+			}
+		})
 
 		return fetchFunc(url, {
 			method: (_method || options.method).toUpperCase(),
 			body: data,
-			headers: deepMerge(options.headers, customHeaders, true),
+			headers: mergedHeaders,
 			credentials: options.withCredentials ? 'include' : 'same-origin',
 			signal: options.cancelToken
 		}).then((res) => {
@@ -255,10 +263,9 @@ export default (function create(/** @type {Options} */ defaults) {
 			return res[options.responseType || 'text']()
 				.then((data) => {
 					response.data = data;
-					// its okay if this fails: response.data will be the unparsed value:
+					if (typeof data === 'object' && data !== null) return;
 					response.data = JSON.parse(data);
 				})
-				.catch(Object)
 				.then(() => (ok ? response : Promise.reject(response)));
 		});
 	}
